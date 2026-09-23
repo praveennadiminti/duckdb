@@ -36,7 +36,7 @@ public:
 	//! The set of temporary objects belonging to this client.
 	shared_ptr<AttachedDatabase> temporary_objects;
 	//! The set of bound prepared statements belonging to this client.
-	case_insensitive_map_t<shared_ptr<PreparedStatementData>> prepared_statements;
+	identifier_map_t<shared_ptr<PreparedStatementData>> prepared_statements;
 
 	//! The random generator used by random().
 	//! Its seed value can be set by setseed().
@@ -44,8 +44,6 @@ public:
 
 	//! The catalog search path.
 	unique_ptr<CatalogSearchPath> catalog_search_path;
-	//! The file search path.
-	string file_search_path;
 
 	//! The file opener of the client context.
 	unique_ptr<FileOpener> file_opener;
@@ -53,11 +51,6 @@ public:
 	unique_ptr<FileSystem> client_file_system;
 	//! The clients' buffer manager wrapper.
 	unique_ptr<BufferManager> client_buffer_manager;
-
-	//! The Max Line Length Size of Last Query Executed on a CSV File. (Only used for testing)
-	//! FIXME: this should not be done like this
-	bool debug_set_max_line_length = false;
-	idx_t debug_max_line_length = 0;
 
 	//! The writer used to log queries, if logging is enabled.
 	//! DEPRECATED: Now, queries are written to the generic log.

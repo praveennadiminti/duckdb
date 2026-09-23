@@ -21,14 +21,14 @@ public:
 	RowGroupSegmentTree(RowGroupCollection &collection, idx_t base_row_id);
 	~RowGroupSegmentTree() override;
 
-	void Initialize(PersistentTableData &data);
+	void Initialize(PersistentTableData &data, optional_ptr<vector<MetaBlockPointer>> read_pointers = nullptr);
 
 	MetaBlockPointer GetRootPointer() const {
 		return root_pointer;
 	}
 
 protected:
-	shared_ptr<RowGroup> LoadSegment() const override;
+	optional<LoadedSegment<RowGroup>> LoadSegment() const override;
 
 	RowGroupCollection &collection;
 	mutable idx_t current_row_group;

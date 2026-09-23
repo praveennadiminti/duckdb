@@ -38,6 +38,7 @@ using duckdb::optional_ptr;
 using duckdb::SQLIdentifier;
 using duckdb::SQLString;
 using duckdb::unordered_map;
+using duckdb::unordered_set;
 struct ShellState;
 using duckdb::InternalException;
 using duckdb::InvalidInputException;
@@ -64,7 +65,6 @@ enum class RenderMode : uint32_t {
 	EXPLAIN,   /* Like RenderMode::Column, but do not truncate data */
 	DESCRIBE,  /* Special DESCRIBE Renderer */
 	ASCII,     /* Use ASCII unit and record separators (0x1F/0x1E) */
-	PRETTY,    /* Pretty-print schemas */
 	EQP,       /* Converts EXPLAIN QUERY PLAN output into a graph */
 	JSON,      /* Output JSON */
 	MARKDOWN,  /* Markdown formatting */
@@ -120,6 +120,8 @@ struct CommandLineOption {
 	metadata_command_t pre_init_callback;
 	metadata_command_t post_init_callback;
 	const char *description;
+	//! Whether one more argument is consumed when the next one is not an option itself
+	bool optional_argument;
 };
 
 struct MetadataCommand {
@@ -149,6 +151,9 @@ struct ShellTableInfo {
 	bool is_view = false;
 	vector<ShellColumnInfo> columns;
 };
+
+enum class BailOnError { AUTOMATIC, BAIL_ON_ERROR, DONT_BAIL_ON_ERROR };
+enum class AutoFormatMode { NO_AUTO_FORMAT, AUTO_FORMAT_COMPLETE_STATEMENTS };
 
 /*
 ** State information about the database connection is contained in an
@@ -197,13 +202,31 @@ public:
 	LargeNumberRendering large_number_rendering = LargeNumberRendering::DEFAULT;
 	//! The command to execute when `-ui` is passed in
 	string ui_command = "CALL start_ui()";
+	//! The command to execute when `-serve` is passed in - `create_secret_if_not_exists` persists the
+	//! token the server picks, so that `-connect` works without any configuration
+	string serve_command = "CALL quack_serve(create_secret_if_not_exists=true{serve_secret|})";
+	//! The command to execute when `-connect` is passed in - `{type}` is the database type given to
+	//! `-connect`, and decides which extension the connection goes through
+	string connect_command = "CONNECT '{type|quack}:'{connect_secret|}";
+	//! Parameters used to expand placeholders in the serve/connect commands
+	unordered_map<string, string> command_parameters;
+	//! Whether the shell was launched as a client using `-connect` - Ctrl-D then exits instead of disconnecting
+	bool started_as_client = false;
 	idx_t last_changes = 0;
 	idx_t total_changes = 0;
 	bool readStdin = true;
 	string initFile;
+	bool run_init = true;
 	unique_ptr<duckdb::MaterializedQueryResult> last_result;
+	bool last_result_referenced = false;
+	//! Whether the last EXPLAIN ANALYZE tree folded any operators (so ".last" has a fuller tree to show)
+	bool last_explain_hid_content = false;
+	//! The widest rendered line of the last EXPLAIN tree, in display columns (used for the pager-width decision)
+	idx_t last_explain_width = 0;
 	//! If the following flag is set, then command execution stops at an error
-	bool bail_on_error = false;
+	BailOnError bail = BailOnError::AUTOMATIC;
+	//! Controls automatic SQL formatting before execution
+	AutoFormatMode auto_format = AutoFormatMode::NO_AUTO_FORMAT;
 	//! Table name when rendering a DESCRIBE statement
 	string describe_table_name;
 
@@ -236,6 +259,8 @@ public:
 	OptionType highlight_results = OptionType::DEFAULT;
 	//! Path to .duckdbrc file
 	string duckdb_rc_path;
+	//! Canonical paths of files currently being processed by .read
+	unordered_set<string> active_read_files;
 	//! Startup text to display
 	StartupText startup_text = StartupText::ALL;
 	//! Whether or not the loading resources message was displayed
@@ -277,13 +302,12 @@ public:
 	//! Shell highlighting mode
 	HighlightMode highlight_mode = HighlightMode::AUTOMATIC;
 
-#if defined(_WIN32) || defined(WIN32)
-	//! When enabled, sets the console page to UTF8 and renders using that code page
-	bool win_utf8_mode = false;
-#endif
-
 public:
+	ShellState();
+	~ShellState();
+
 	static ShellState &Get();
+	static ShellState *&GetReference();
 
 	void Initialize();
 	void Destroy();
@@ -301,9 +325,11 @@ public:
 	bool DisplaySchemas(const vector<string> &args);
 	MetadataResult DisplayEntries(const vector<string> &args, char type);
 	MetadataResult DisplayTables(const vector<string> &args);
+	MetadataResult DisplayManual(const vector<string> &args);
 	void ShowConfiguration();
 	void ClearInterrupt();
 
+	static void Exit(int exit_code);
 	static idx_t RenderLength(const char *str, idx_t str_len);
 	static idx_t RenderLength(duckdb::string_t str);
 	static idx_t RenderLength(const string &str);
@@ -312,6 +338,7 @@ public:
 	void SetTextMode();
 	static idx_t StringLength(const char *z);
 	void SetTableName(const char *zName);
+	static void StaticPrint(PrintOutput output, const char *str, idx_t len);
 	void Print(PrintOutput output, const char *str, idx_t len);
 	void Print(PrintOutput output, const char *str);
 	void Print(PrintOutput output, duckdb::string_t str);
@@ -334,10 +361,14 @@ public:
 	vector<string> TableColumnList(const char *zTab);
 	SuccessState ExecuteStatement(unique_ptr<duckdb::SQLStatement> statement);
 	static bool UseDescribeRenderMode(const duckdb::SQLStatement &stmt, string &describe_table_name);
+	//! Route EXPLAIN ANALYZE output through the shell's direct-printing renderer when on an interactive console
+	void SetupPrettyExplain(duckdb::SQLStatement &statement);
 	void RenderTableMetadata(vector<ShellTableInfo> &result);
 
 	void PrintDatabaseError(const string &zErr);
 	int RunInitialCommand(const char *sql, bool bail);
+	//! Expand `{parameter|default}` placeholders in a command using the parameters set on the command line
+	bool ExpandCommandParameters(const string &command, string &result);
 	void AddError();
 
 	SuccessState ExecuteSQL(const string &zSql);
@@ -361,6 +392,11 @@ public:
 	bool ShouldUsePager(ShellRenderer &renderer, RenderingQueryResult &result);
 	bool ShouldUsePager();
 	bool ShouldUsePager(idx_t line_count);
+	//! Whether to page a block of output based on whether it fits on the screen - either too tall (line_count vs the
+	//! terminal height) or too wide (render_width vs the max render width). Used for tree output.
+	bool ShouldUsePagerForSize(idx_t line_count, idx_t render_width);
+	//! The terminal height in rows, or 0 when it cannot be determined
+	idx_t GetScreenHeight();
 	idx_t GetMaxRenderWidth() const;
 	string GetSystemPager();
 	unique_ptr<PagerState> SetupPager();
@@ -380,8 +416,9 @@ public:
 	int RunOneSqlLine(InputMode mode, char *zSql);
 	string GetDefaultDuckDBRC();
 	bool ProcessDuckDBRC(const char *file);
-	bool ProcessFile(const string &file, bool is_duckdb_rc = false);
+	bool ProcessFile(const string &file, InputMode input_mode = InputMode::FILE, bool default_duckdb_rc = false);
 	int ProcessInput(InputMode mode);
+	bool GetBailOnError(InputMode mode);
 	static bool SQLIsComplete(const char *zSql);
 	static bool IsSpace(char c);
 	static bool IsDigit(char c);
@@ -395,6 +432,8 @@ public:
 	void DetectDarkLightMode();
 #if defined(_WIN32) || defined(WIN32)
 	static std::wstring Win32Utf8ToUnicode(const string &zText);
+	static std::wstring Win32Utf8ToUnicode(const char *) = delete;
+	static std::wstring Win32Utf8ToUnicode(char *) = delete;
 	static string Win32UnicodeToUtf8(const std::wstring &zWideText);
 	static string Win32MbcsToUtf8(const string &zText, bool useAnsi);
 	static string Win32Utf8ToMbcs(const string &zText, bool useAnsi);
@@ -427,24 +466,22 @@ public:
 	FILE *OpenOutputFile(const char *zFile, int bTextMode);
 	static void SetPrompt(char prompt[], const string &new_value);
 	static string ModeToString(RenderMode mode);
-
-private:
-	ShellState();
-	~ShellState();
+	MetadataResult FormatSQL(string &sql);
+	void HighlightSQL(string &sql);
+	// Print a complete SQL statement directly to the output, applying syntax highlighting when appropriate
+	void PrintSQL(const string &sql);
+	string ReadFileContents(FILE *f);
+	string ReadFileContents(const string &filename);
 };
 
 struct PagerState {
-	explicit PagerState(ShellState &state) : state(state) {
+	explicit PagerState(ShellState &state, uint32_t win_console_cp_before_pager_p = 0)
+	    : state(state), win_console_cp_before_pager(win_console_cp_before_pager_p) {
 	}
-	~PagerState() {
-		if (state) {
-			state->ResetOutput();
-			ShellState::FinishPagerDisplay();
-			state = nullptr;
-		}
-	}
+	~PagerState();
 
 	optional_ptr<ShellState> state;
+	uint32_t win_console_cp_before_pager = 0;
 };
 
 } // namespace duckdb_shell

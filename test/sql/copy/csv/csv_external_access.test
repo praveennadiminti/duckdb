@@ -3,9 +3,6 @@
 # group: [csv]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE date_test(d date);
 
 statement ok
@@ -38,7 +35,7 @@ Permission Error
 statement error
 SET enable_external_access=true;
 ----
-Cannot change enable_external_access setting while database is running
+Cannot enable external access while database is running
 
 # sniffer also respects external access flag
 statement error

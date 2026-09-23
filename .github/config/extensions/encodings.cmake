@@ -3,7 +3,8 @@ duckdb_extension_load(encodings
         LOAD_TESTS
         DONT_LINK
         GIT_URL https://github.com/duckdb/duckdb-encodings
-        GIT_TAG b5a547ec74fad87698ed3142033d7b9cf86e0b2f
+        GIT_TAG f3e4d03ecf18406ef86fe5833a7ad55d8f93520f
         TEST_DIR test/sql
+        APPLY_PATCHES
 )
 endif()

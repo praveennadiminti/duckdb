@@ -23,7 +23,7 @@ private:
 		return;
 #else
 		if (DUCKDB_UNLIKELY(null)) {
-			throw duckdb::InternalException("Attempted to dereference shared_ptr that is NULL!");
+			ThrowNullSharedPtrDereference();
 		}
 #endif
 	}
@@ -248,6 +248,18 @@ public:
 	template <typename U>
 	bool operator>=(const shared_ptr<U> &other) const noexcept {
 		return internal >= other.internal;
+	}
+
+	shared_ptr<T, SAFE> atomic_load() const {
+		return shared_ptr<T, SAFE>(std::atomic_load(&internal));
+	}
+
+	shared_ptr<T, SAFE> atomic_load(std::memory_order order) const {
+		return shared_ptr<T, SAFE>(std::atomic_load_explicit(&internal, order));
+	}
+
+	void atomic_store(const shared_ptr<T, SAFE> &new_ptr) {
+		std::atomic_store(&internal, new_ptr.internal);
 	}
 
 private:

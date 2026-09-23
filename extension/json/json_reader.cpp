@@ -1,10 +1,14 @@
 #include "json_reader.hpp"
+#include "duckdb/main/client_context.hpp"
+
+#include <utility>
 
 #include "duckdb/common/file_opener.hpp"
+#include "duckdb/common/file_open_flags.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
+#include "duckdb/storage/caching_mode.hpp"
 #include "json_scan.hpp"
-#include <utility>
 
 namespace duckdb {
 
@@ -139,7 +143,7 @@ idx_t JSONFileHandle::ReadInternal(char *pointer, const idx_t requested_size) {
 	// Deal with reading from pipes
 	idx_t total_read_size = 0;
 	while (total_read_size < requested_size) {
-		auto read_size = file_handle->Read(pointer + total_read_size, requested_size - total_read_size);
+		auto read_size = file_handle->Read(context, pointer + total_read_size, requested_size - total_read_size);
 		if (read_size == 0) {
 			break;
 		}
@@ -175,15 +179,17 @@ idx_t JSONFileHandle::ReadFromCache(char *&pointer, idx_t &size, atomic<idx_t> &
 }
 
 JSONReader::JSONReader(ClientContext &context, JSONReaderOptions options_p, OpenFileInfo file_p)
-    : BaseFileReader(std::move(file_p)), context(context), options(std::move(options_p)), initialized(0),
-      next_buffer_index(0), thrown(false) {
+    : file(std::move(file_p)), context(context), options(std::move(options_p)), initialized(0), next_buffer_index(0),
+      thrown(false) {
 }
 
 void JSONReader::OpenJSONFile() {
 	lock_guard<mutex> guard(lock);
 	if (!IsOpen()) {
 		auto &fs = FileSystem::GetFileSystem(context);
-		auto regular_file_handle = fs.OpenFile(file, FileFlags::FILE_FLAGS_READ | options.compression);
+		FileOpenFlags flags = FileFlags::FILE_FLAGS_READ | options.compression;
+		flags.SetCachingMode(CachingMode::CACHE_REMOTE_ONLY);
+		auto regular_file_handle = fs.OpenFile(file, flags);
 		file_handle = make_uniq<JSONFileHandle>(context, std::move(regular_file_handle), BufferAllocator::Get(context));
 	}
 	Reset();
@@ -506,6 +512,121 @@ static inline const char *NextJSON(const char *ptr, const idx_t size) {
 	return ptr == end ? nullptr : ptr;
 }
 
+//! Skip over a single JSON value, leaving pos just after it
+static bool SkipJSONValue(const char *buffer_ptr, const idx_t buffer_size, idx_t &pos) {
+	const auto skip_string = [&]() {
+		pos++; // opening quote
+		while (pos < buffer_size && buffer_ptr[pos] != '"') {
+			pos += buffer_ptr[pos] == '\\' ? 2 : 1;
+		}
+		if (pos >= buffer_size) {
+			return false;
+		}
+		pos++; // closing quote
+		return true;
+	};
+
+	if (pos >= buffer_size) {
+		return false;
+	}
+	if (buffer_ptr[pos] == '"') {
+		return skip_string();
+	}
+	if (buffer_ptr[pos] == '{' || buffer_ptr[pos] == '[') {
+		idx_t depth = 0;
+		while (pos < buffer_size) {
+			const auto c = buffer_ptr[pos];
+			if (c == '"') {
+				if (!skip_string()) {
+					return false;
+				}
+				continue;
+			}
+			if (c == '{' || c == '[') {
+				depth++;
+			} else if (c == '}' || c == ']') {
+				if (--depth == 0) {
+					pos++;
+					return true;
+				}
+			}
+			pos++;
+		}
+		return false;
+	}
+	// A number, or one of true/false/null
+	while (pos < buffer_size && buffer_ptr[pos] != ',' && buffer_ptr[pos] != '}' &&
+	       !StringUtil::CharacterIsSpace(buffer_ptr[pos])) {
+		pos++;
+	}
+	return true;
+}
+
+//! Recognize a GeoJSON FeatureCollection and locate the '[' that opens its "features" array. This is a textual
+//! scan rather than a parse because the array is usually far bigger than the buffer we have here.
+static bool FindFeatureCollectionArray(const char *buffer_ptr, const idx_t buffer_size, idx_t &features_offset) {
+	idx_t pos = 0;
+	SkipWhitespace(buffer_ptr, pos, buffer_size);
+	if (pos >= buffer_size || buffer_ptr[pos] != '{') {
+		return false;
+	}
+	pos++;
+
+	while (pos < buffer_size) {
+		SkipWhitespace(buffer_ptr, pos, buffer_size);
+		if (pos >= buffer_size || buffer_ptr[pos] == '}') {
+			return false;
+		}
+		if (buffer_ptr[pos] == ',') {
+			pos++;
+			continue;
+		}
+		if (buffer_ptr[pos] != '"') {
+			return false;
+		}
+
+		const auto key_start = ++pos;
+		while (pos < buffer_size && buffer_ptr[pos] != '"') {
+			pos += buffer_ptr[pos] == '\\' ? 2 : 1;
+		}
+		if (pos >= buffer_size) {
+			return false;
+		}
+		const auto key_size = pos++ - key_start;
+
+		SkipWhitespace(buffer_ptr, pos, buffer_size);
+		if (pos >= buffer_size || buffer_ptr[pos] != ':') {
+			return false;
+		}
+		pos++;
+		SkipWhitespace(buffer_ptr, pos, buffer_size);
+		if (pos >= buffer_size) {
+			return false;
+		}
+
+		if (key_size == 8 && memcmp(buffer_ptr + key_start, "features", 8) == 0) {
+			if (buffer_ptr[pos] != '[') {
+				return false;
+			}
+			// "type" usually precedes "features", but accept the other order as long as nothing contradicts us
+			features_offset = pos;
+			return true;
+		}
+		if (key_size == 4 && memcmp(buffer_ptr + key_start, "type", 4) == 0) {
+			static constexpr auto FEATURE_COLLECTION = "\"FeatureCollection\"";
+			static constexpr idx_t FEATURE_COLLECTION_SIZE = 19;
+			if (pos + FEATURE_COLLECTION_SIZE > buffer_size ||
+			    memcmp(buffer_ptr + pos, FEATURE_COLLECTION, FEATURE_COLLECTION_SIZE) != 0) {
+				return false; // Some other kind of object
+			}
+		}
+		if (!SkipJSONValue(buffer_ptr, buffer_size, pos)) {
+			return false;
+		}
+	}
+	return false;
+}
+
 void JSONReader::SkipOverArrayStart(JSONReaderScanState &scan_state) {
 	// First read of this buffer, check if it's actually an array and skip over the bytes
 	auto &buffer_ptr = scan_state.buffer_ptr;
@@ -514,6 +635,14 @@ void JSONReader::SkipOverArrayStart(JSONReaderScanState &scan_state) {
 	SkipWhitespace(buffer_ptr, buffer_offset, buffer_size);
 	if (buffer_offset == buffer_size) {
 		return; // Empty file
+	}
+	if (skip_feature_collection_prefix) {
+		// Position ourselves on the '[' of the "features" array, then continue as a regular array
+		idx_t features_offset;
+		if (!FindFeatureCollectionArray(buffer_ptr, buffer_size, features_offset)) {
+			throw InvalidInputException("Expected a GeoJSON FeatureCollection in file \"%s\"", GetFileName());
+		}
+		buffer_offset = features_offset;
 	}
 	if (buffer_ptr[buffer_offset] != '[') {
 		throw InvalidInputException(
@@ -529,11 +658,14 @@ void JSONReader::SkipOverArrayStart(JSONReaderScanState &scan_state) {
 	if (buffer_ptr[buffer_offset] == ']') {
 		// Empty array
 		SkipWhitespace(buffer_ptr, ++buffer_offset, buffer_size);
-		if (buffer_offset != buffer_size) {
+		if (buffer_offset != buffer_size && !skip_feature_collection_prefix) {
 			throw InvalidInputException(
 			    "Empty array with trailing data when parsing JSON array with format='array' in file \"%s\"",
 			    GetFileName());
 		}
+		// The rest of the FeatureCollection is not ours to read
+		buffer_offset = buffer_size;
+		scan_state.skip_remainder_of_file = skip_feature_collection_prefix;
 	}
 }
 
@@ -618,7 +750,7 @@ static pair<JSONFormat, JSONRecordType> DetectFormatAndRecordType(char *const bu
 	return make_pair(JSONFormat::ARRAY, JSONRecordType::VALUES);
 }
 
-void JSONReader::ParseJSON(JSONReaderScanState &scan_state, char *const json_start, const idx_t json_size,
+bool JSONReader::ParseJSON(JSONReaderScanState &scan_state, char *const json_start, const idx_t json_size,
                            const idx_t remaining) {
 	yyjson_doc *doc;
 	yyjson_read_err err;
@@ -640,7 +772,7 @@ void JSONReader::ParseJSON(JSONReaderScanState &scan_state, char *const json_sta
 		}
 		if (!can_ignore_this_error) {
 			AddParseError(scan_state, scan_state.lines_or_objects_in_buffer, err, extra);
-			return;
+			return false;
 		}
 	}
 
@@ -652,30 +784,36 @@ void JSONReader::ParseJSON(JSONReaderScanState &scan_state, char *const json_sta
 		err.msg = "unexpected end of data";
 		err.pos = json_size;
 		AddParseError(scan_state, scan_state.lines_or_objects_in_buffer, err, "Try auto-detecting the JSON format");
-		return;
-	} else if (!options.ignore_errors && read_size < json_size) {
+		return false;
+	}
+	if (read_size < json_size) {
 		idx_t off = read_size;
 		idx_t rem = json_size;
 		SkipWhitespace(json_start, off, rem);
 		if (off != rem) { // Between end of document and boundary should be whitespace only
-			err.code = YYJSON_READ_ERROR_UNEXPECTED_CONTENT;
-			err.msg = "unexpected content after document";
-			err.pos = read_size;
-			AddParseError(scan_state, scan_state.lines_or_objects_in_buffer, err, "Try auto-detecting the JSON format");
-			return;
+			if (!options.ignore_errors) {
+				err.code = YYJSON_READ_ERROR_UNEXPECTED_CONTENT;
+				err.msg = "unexpected content after document";
+				err.pos = read_size;
+				AddParseError(scan_state, scan_state.lines_or_objects_in_buffer, err,
+				              "Try auto-detecting the JSON format");
+				return false;
+			}
+			doc = nullptr;
 		}
 	}
 
 	scan_state.lines_or_objects_in_buffer++;
 	if (!doc) {
 		scan_state.values[scan_state.scan_count] = nullptr;
-		return;
+		return true;
 	}
 
 	// Set the JSONLine and trim
 	scan_state.units[scan_state.scan_count] = JSONString(json_start, json_size);
 	TrimWhitespace(scan_state.units[scan_state.scan_count]);
 	scan_state.values[scan_state.scan_count] = doc->root;
+	return true;
 }
 
 void JSONReader::AutoDetect(Allocator &allocator, idx_t buffer_capacity) {
@@ -693,12 +831,23 @@ void JSONReader::AutoDetect(Allocator &allocator, idx_t buffer_capacity) {
 	}
 	// perform auto-detection over the data we just read
 	JSONAllocator json_allocator(allocator);
-	auto format_and_record_type = DetectFormatAndRecordType(buffer_ptr, read_size, json_allocator.GetYYAlc());
-	if (GetFormat() == JSONFormat::AUTO_DETECT) {
-		SetFormat(format_and_record_type.first);
-	}
-	if (GetRecordType() == JSONRecordType::AUTO_DETECT) {
-		SetRecordType(format_and_record_type.second);
+	idx_t features_offset;
+	if (options.geojson.value_or(false) && GetFormat() == JSONFormat::AUTO_DETECT &&
+	    FindFeatureCollectionArray(buffer_ptr, read_size, features_offset)) {
+		// A FeatureCollection is one big object whose "features" array holds the rows, so read it as an array
+		skip_feature_collection_prefix = true;
+		SetFormat(JSONFormat::ARRAY);
+		if (GetRecordType() == JSONRecordType::AUTO_DETECT) {
+			SetRecordType(JSONRecordType::RECORDS);
+		}
+	} else {
+		auto format_and_record_type = DetectFormatAndRecordType(buffer_ptr, read_size, json_allocator.GetYYAlc());
+		if (GetFormat() == JSONFormat::AUTO_DETECT) {
+			SetFormat(format_and_record_type.first);
+		}
+		if (GetRecordType() == JSONRecordType::AUTO_DETECT) {
+			SetRecordType(format_and_record_type.second);
+		}
 	}
 	if (!options.ignore_errors && options.record_type == JSONRecordType::RECORDS &&
 	    GetRecordType() != JSONRecordType::RECORDS) {
@@ -762,7 +911,7 @@ bool JSONReader::CopyRemainderFromPreviousBuffer(JSONReaderScanState &scan_state
 	return true;
 }
 
-void JSONReader::ParseNextChunk(JSONReaderScanState &scan_state) {
+bool JSONReader::ParseNextChunk(JSONReaderScanState &scan_state) {
 	const auto format = GetFormat();
 	auto &buffer_ptr = scan_state.buffer_ptr;
 	auto &buffer_offset = scan_state.buffer_offset;
@@ -796,11 +945,21 @@ void JSONReader::ParseNextChunk(JSONReaderScanState &scan_state) {
 		}
 
 		idx_t json_size = json_end - json_start;
-		ParseJSON(scan_state, json_start, json_size, remaining);
+		if (!ParseJSON(scan_state, json_start, json_size, remaining)) {
+			return false;
+		}
 		buffer_offset += json_size;
 
 		if (format == JSONFormat::ARRAY) {
 			SkipWhitespace(buffer_ptr, buffer_offset, buffer_size);
+			if (buffer_ptr[buffer_offset] == ']' && skip_feature_collection_prefix) {
+				// Anything after the "features" array (the closing brace, "bbox", ...) is not ours to read.
+				// Count the value we just parsed, since breaking here skips the loop's increment.
+				buffer_offset = buffer_size;
+				scan_state.skip_remainder_of_file = true;
+				scan_count++;
+				break;
+			}
 			if (buffer_ptr[buffer_offset] == ',' || buffer_ptr[buffer_offset] == ']') {
 				buffer_offset++;
 			} else { // We can't ignore this error, even with 'ignore_errors'
@@ -809,11 +968,12 @@ void JSONReader::ParseNextChunk(JSONReaderScanState &scan_state) {
 				err.msg = "unexpected character";
 				err.pos = json_size;
 				AddParseError(scan_state, scan_state.lines_or_objects_in_buffer, err);
-				return;
+				return false;
 			}
 		}
 		SkipWhitespace(buffer_ptr, buffer_offset, buffer_size);
 	}
+	return true;
 }
 
 void JSONReader::Initialize(Allocator &allocator, idx_t buffer_size) {
@@ -838,6 +998,7 @@ bool JSONReader::InitializeScan(JSONReaderScanState &scan_state, JSONFileReadTyp
 	}
 	scan_state.current_reader = this;
 	scan_state.is_first_scan = true;
+	scan_state.skip_remainder_of_file = false;
 	scan_state.file_read_type = file_read_type;
 	if (file_read_type == JSONFileReadType::SCAN_ENTIRE_FILE) {
 		// when initializing a single-file scan we don't need to read anything yet
@@ -863,12 +1024,15 @@ idx_t JSONReader::Scan(JSONReaderScanState &scan_state) {
 				return 0;
 			}
 			// read the next buffer
-			if (!ReadNextBuffer(scan_state)) {
+			if (scan_state.skip_remainder_of_file || !ReadNextBuffer(scan_state)) {
 				// we have exhausted the file
 				return 0;
 			}
 		}
-		ParseNextChunk(scan_state);
+		if (!ParseNextChunk(scan_state)) {
+			// found an error but we can't handle it - return
+			return 0;
+		}
 	}
 	return scan_state.scan_count;
 }
@@ -1045,8 +1209,9 @@ void JSONReader::ReadNextBufferSeek(JSONReaderScanState &scan_state) {
 			if (!raw_handle.OnDiskFile() && raw_handle.CanSeek()) {
 				if (!scan_state.thread_local_filehandle ||
 				    scan_state.thread_local_filehandle->GetPath() != raw_handle.GetPath()) {
-					scan_state.thread_local_filehandle = scan_state.fs.OpenFile(
-					    raw_handle.GetPath(), FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+					FileOpenFlags flags = FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO;
+					flags.SetCachingMode(CachingMode::CACHE_REMOTE_ONLY);
+					scan_state.thread_local_filehandle = scan_state.fs.OpenFile(raw_handle.GetPath(), flags);
 				}
 			} else if (scan_state.thread_local_filehandle) {
 				scan_state.thread_local_filehandle = nullptr;

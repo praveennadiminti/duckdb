@@ -9,18 +9,19 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
-#include "duckdb/common/atomic.hpp"
 #include "duckdb/main/valid_checker.hpp"
 #include "duckdb/common/types/timestamp.hpp"
-#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/reference_map.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
+#include "duckdb/main/attached_database.hpp"
 
 namespace duckdb {
 class AttachedDatabase;
 class ClientContext;
+class SecretManager;
+class SecretStorage;
 struct DatabaseModificationType;
 class Transaction;
 
@@ -40,6 +41,7 @@ class MetaTransaction {
 public:
 	DUCKDB_API MetaTransaction(ClientContext &context, timestamp_t start_timestamp,
 	                           transaction_t global_transaction_id);
+	DUCKDB_API ~MetaTransaction();
 
 	ClientContext &context;
 	//! The timestamp when the transaction started
@@ -63,6 +65,8 @@ public:
 
 	ErrorData Commit();
 	void Rollback();
+	// Finalize the transaction after a COMMIT of ROLLBACK.
+	void Finalize();
 
 	idx_t GetActiveQuery();
 	void SetActiveQuery(transaction_t query_number);
@@ -76,28 +80,32 @@ public:
 	const vector<reference<AttachedDatabase>> &OpenedTransactions() const {
 		return all_transactions;
 	}
-	optional_ptr<AttachedDatabase> GetReferencedDatabase(const string &name);
-	shared_ptr<AttachedDatabase> GetReferencedDatabaseOwning(const string &name);
+	optional_ptr<AttachedDatabase> GetReferencedDatabase(const Identifier &name);
+	shared_ptr<AttachedDatabase> GetReferencedDatabaseOwning(const Identifier &name);
 	AttachedDatabase &UseDatabase(shared_ptr<AttachedDatabase> &database);
 	void DetachDatabase(AttachedDatabase &database);
 
 private:
-	//! Lock to prevent all_transactions and transactions from getting out of sync
+	friend class SecretManager;
+
+	//! Lock to prevent all_transactions and transactions from getting out of sync.
 	mutex lock;
-	//! The set of active transactions for each database
+	//! The set of active transactions for each database.
 	reference_map_t<AttachedDatabase, TransactionReference> transactions;
-	//! The set of transactions in order of when they were started
+	//! The set of referenced databases in invocation order.
 	vector<reference<AttachedDatabase>> all_transactions;
-	//! The database we are modifying - we can only modify one database per transaction
+	//! The database we are modifying. We can only modify one database per meta transaction.
 	optional_ptr<AttachedDatabase> modified_database;
-	//! Whether or not the meta transaction is marked as read only
+	//! Whether the meta transaction is marked as read only.
 	bool is_read_only;
-	//! Lock for referenced_databases
+	//! Lock for referenced_databases.
 	mutex referenced_database_lock;
-	//! The set of used / referenced databases
+	//! The set of used (referenced) databases.
 	reference_map_t<AttachedDatabase, shared_ptr<AttachedDatabase>> referenced_databases;
-	//! Map of name -> used database for databases that are in-use by this transaction
-	case_insensitive_map_t<reference<AttachedDatabase>> used_databases;
+	//! Map of name -> database for databases that are in-use by this transaction.
+	identifier_map_t<reference<AttachedDatabase>> used_databases;
+	//! Secrets that only live for the duration of this transaction.
+	unique_ptr<SecretStorage> transaction_secret_storage;
 };
 
 } // namespace duckdb

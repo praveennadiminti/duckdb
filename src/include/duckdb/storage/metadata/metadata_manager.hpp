@@ -12,7 +12,6 @@
 #include "duckdb/storage/block.hpp"
 #include "duckdb/storage/block_manager.hpp"
 #include "duckdb/common/atomic.hpp"
-#include "duckdb/common/set.hpp"
 #include "duckdb/storage/buffer/buffer_handle.hpp"
 
 namespace duckdb {
@@ -79,8 +78,9 @@ public:
 	static MetaBlockPointer FromBlockPointer(BlockPointer block_pointer, const idx_t metadata_block_size);
 
 	//! Flush all blocks to disk
-	void Flush();
+	void Flush(QueryContext context = QueryContext());
 
+	bool BlockIsModified(const MetaBlockPointer &ptr);
 	bool BlockHasBeenCleared(const MetaBlockPointer &ptr);
 
 	void MarkBlocksAsModified();

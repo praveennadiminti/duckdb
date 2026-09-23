@@ -73,4 +73,34 @@ struct StIntersectsExtentFunAlias {
 	static constexpr const char *Name = "&&";
 };
 
+struct StCrsFun {
+	static constexpr const char *Name = "st_crs";
+	static constexpr const char *Parameters = "geom";
+	static constexpr const char *Description = "Returns the Coordinate Reference System (CRS) identifier of the geometry";
+	static constexpr const char *Example = "";
+	static constexpr const char *Categories = "geometry";
+
+	static ScalarFunction GetFunction();
+};
+
+struct StSetcrsFun {
+	static constexpr const char *Name = "st_setcrs";
+	static constexpr const char *Parameters = "geom,crs";
+	static constexpr const char *Description = "Sets the Coordinate Reference System (CRS) identifier of the geometry";
+	static constexpr const char *Example = "";
+	static constexpr const char *Categories = "geometry";
+
+	static ScalarFunction GetFunction();
+};
+
+struct VertexExtractFun {
+	static constexpr const char *Name = "vertex_extract";
+	static constexpr const char *Parameters = "geom,coordinate";
+	static constexpr const char *Description = "Extracts the specified coordinate (X, Y, Z, M) from a point geometry";
+	static constexpr const char *Example = "vertex_extract('POINT(1 2 3)', 'Z')";
+	static constexpr const char *Categories = "geometry";
+
+	static ScalarFunction GetFunction();
+};
+
 } // namespace duckdb

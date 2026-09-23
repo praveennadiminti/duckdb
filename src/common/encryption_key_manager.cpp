@@ -1,8 +1,10 @@
 #include "duckdb/common/encryption_key_manager.hpp"
+#include "duckdb/main/database.hpp"
 #include "mbedtls_wrapper.hpp"
 #include "duckdb/common/exception/conversion_exception.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/types/blob.hpp"
+#include "duckdb/storage/storage_info.hpp"
 
 #if defined(_WIN32)
 #include "duckdb/common/windows.hpp"
@@ -51,10 +53,7 @@ void EncryptionKey::UnlockEncryptionKey(data_ptr_t key, idx_t key_len) {
 }
 
 EncryptionKeyManager &EncryptionKeyManager::GetInternal(ObjectCache &cache) {
-	if (!cache.Get<EncryptionKeyManager>(EncryptionKeyManager::ObjectType())) {
-		cache.Put(EncryptionKeyManager::ObjectType(), make_shared_ptr<EncryptionKeyManager>());
-	}
-	return *cache.Get<EncryptionKeyManager>(EncryptionKeyManager::ObjectType());
+	return *cache.GetOrCreate<EncryptionKeyManager>(EncryptionKeyManager::ObjectType());
 }
 
 EncryptionKeyManager &EncryptionKeyManager::Get(ClientContext &context) {
@@ -78,7 +77,7 @@ string EncryptionKeyManager::GenerateRandomKeyID() {
 void EncryptionKeyManager::AddKey(const string &key_name, data_ptr_t key) {
 	lock_guard<mutex> guard(lock);
 	derived_keys.emplace(key_name, EncryptionKey(key));
-	// Zero-out the encryption key
+	// Zero-out the input encryption key
 	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS::SecureClearData(key, DERIVED_KEY_LENGTH);
 }
 
@@ -95,6 +94,19 @@ const_data_ptr_t EncryptionKeyManager::GetKey(const string &key_name) const {
 
 void EncryptionKeyManager::DeleteKey(const string &key_name) {
 	lock_guard<mutex> guard(lock);
+	ClearKey(key_name);
+	EraseKey(key_name);
+}
+
+void EncryptionKeyManager::ClearKey(const string &key_name) {
+	D_ASSERT(HasKey(key_name));
+	auto const key_data = derived_keys.at(key_name).GetData();
+	// clear the key (zero-out its memory)
+	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS::SecureClearData(key_data,
+	                                                                 MainHeader::DEFAULT_ENCRYPTION_KEY_LENGTH);
+}
+
+void EncryptionKeyManager::EraseKey(const string &key_name) {
 	derived_keys.erase(key_name);
 }
 
@@ -134,6 +146,7 @@ void EncryptionKeyManager::DeriveKey(string &user_key, data_ptr_t salt, data_ptr
 
 	KeyDerivationFunctionSHA256(reinterpret_cast<const_data_ptr_t>(decoded_key.data()), decoded_key.size(), salt,
 	                            derived_key);
+
 	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS::SecureClearData(data_ptr_cast(&user_key[0]), user_key.size());
 	duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLS::SecureClearData(data_ptr_cast(&decoded_key[0]),
 	                                                                 decoded_key.size());

@@ -11,6 +11,7 @@
 
 #include <unordered_map>
 #include <unordered_set>
+#include "duckdb/common/insertion_order_preserving_map.hpp"
 
 namespace duckdb {
 struct BenchmarkFileReader;
@@ -33,7 +34,7 @@ public:
 //! Interpreted benchmarks read the benchmark from a file
 class InterpretedBenchmark : public Benchmark {
 public:
-	InterpretedBenchmark(string full_path);
+	explicit InterpretedBenchmark(string full_path);
 
 	void LoadBenchmark();
 	//! Initialize the benchmark state
@@ -84,6 +85,8 @@ private:
 	unique_ptr<QueryResult> RunLoadQuery(InterpretedBenchmarkState &state, const string &load_query);
 
 	void ProcessFile(const string &path);
+	void AddExtension(const string &extension, bool load_only);
+	void LoadExtensions(InterpretedBenchmarkState &state, bool is_load_set);
 
 private:
 	bool is_loaded = false;
@@ -99,8 +102,8 @@ private:
 	// check the existence of a cached db, but do not connect
 	// can be used to test accessing data from a different db in a non-persistent connection
 	bool cache_no_connect = false;
-	std::unordered_set<string> extensions;
-	std::unordered_set<string> load_extensions;
+	InsertionOrderPreservingMap<idx_t> extensions_map;
+	InsertionOrderPreservingMap<idx_t> load_extensions_map;
 
 	//! Queries used to assert a given state of the data
 	vector<BenchmarkQuery> assert_queries;
@@ -115,6 +118,8 @@ private:
 	bool in_memory = true;
 	string storage_version;
 	QueryResultType result_type = QueryResultType::MATERIALIZED_RESULT;
+	//! Discard fetched chunks instead of materializing them into the benchmark result
+	bool discard_stream_result = false;
 	idx_t arrow_batch_size = STANDARD_VECTOR_SIZE;
 	bool require_reinit = false;
 };

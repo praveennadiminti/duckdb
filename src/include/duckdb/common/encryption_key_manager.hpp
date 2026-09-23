@@ -13,6 +13,8 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/storage/object_cache.hpp"
+#include "duckdb/storage/storage_info.hpp"
+#include "duckdb/main/database.hpp"
 
 namespace duckdb {
 
@@ -29,6 +31,10 @@ public:
 
 public:
 	const_data_ptr_t GetPtr() const {
+		return key;
+	}
+
+	data_ptr_t GetData() {
 		return key;
 	}
 
@@ -50,11 +56,16 @@ public:
 	void AddKey(const string &key_name, data_ptr_t key);
 	bool HasKey(const string &key_name) const;
 	void DeleteKey(const string &key_name);
+	void ClearKey(const string &key_name);
+	void EraseKey(const string &key_name);
 	const_data_ptr_t GetKey(const string &key_name) const;
 
 public:
 	static string ObjectType();
 	string GetObjectType() override;
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx {};
+	}
 
 public:
 public:

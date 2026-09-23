@@ -49,10 +49,11 @@ struct CClientArrowOptionsWrapper {
 
 struct PreparedStatementWrapper {
 	//! Map of name -> values
-	case_insensitive_map_t<BoundParameterData> values;
+	identifier_map_t<BoundParameterData> values;
 	unique_ptr<PreparedStatement> statement;
 	bool success = true;
 	ErrorData error_data;
+	unordered_map<idx_t, string> param_index_to_name;
 };
 
 struct ExtractStatementsWrapper {
@@ -73,6 +74,7 @@ struct ArrowResultWrapper {
 struct AppenderWrapper {
 	unique_ptr<BaseAppender> appender;
 	ErrorData error_data;
+	bool flush_failed = false;
 };
 
 struct TableDescriptionWrapper {

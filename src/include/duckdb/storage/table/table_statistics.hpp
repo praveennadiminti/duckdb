@@ -8,8 +8,6 @@
 
 #pragma once
 
-#include "duckdb/common/common.hpp"
-#include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/execution/reservoir_sample.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/storage/statistics/column_statistics.hpp"
@@ -42,7 +40,8 @@ public:
 
 	void MergeStats(TableStatistics &other);
 	void MergeStats(idx_t i, BaseStatistics &stats);
-	void MergeStats(TableStatisticsLock &lock, idx_t i, BaseStatistics &stats);
+	void MergeStats(TableStatisticsLock &lock, idx_t i, BaseStatistics &stats,
+	                StatsMergeType merge_type = StatsMergeType::MERGE_STATS);
 
 	void SetStats(TableStatistics &other);
 	void CopyStats(TableStatistics &other);
@@ -60,7 +59,7 @@ public:
 	void DestroyTableSample(TableStatisticsLock &lock) const;
 	void AppendToTableSample(TableStatisticsLock &lock, unique_ptr<BlockingSample> sample);
 
-	bool Empty();
+	bool Empty() const;
 
 	unique_ptr<TableStatisticsLock> GetLock();
 

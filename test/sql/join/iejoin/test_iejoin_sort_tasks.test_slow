@@ -2,9 +2,10 @@
 # description: Test IEJoin
 # group: [iejoin]
 
-# No verification - it doesn't scale
+statement ok
+SET profiling_renderer_settings = MAP {'operator_casing': 'upper'};
 
-# Otherwise we run out of memory
+# Otherwise, we run out of memory.
 require 64bit
 
 require ram 8gb

@@ -10,6 +10,7 @@
 
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 
 namespace duckdb {
@@ -86,6 +87,10 @@ public:
 	WindowCursor(const WindowCollection &paged, column_t col_idx);
 	WindowCursor(const WindowCollection &paged, vector<column_t> column_ids);
 
+	//! The row count of the paged collection
+	idx_t Count() const {
+		return paged.size();
+	}
 	//! Is the scan in range?
 	inline bool RowIsVisible(idx_t row_idx) const {
 		return (row_idx < state.next_row_index && state.current_row_index <= row_idx);
@@ -239,7 +244,7 @@ static void WindowDeltaScanner(ColumnDataCollection &collection, idx_t block_beg
 			//	Save the last row of the scanned chunk
 			count = 1;
 			sel_t last = UnsafeNumericCast<sel_t>(scanned.size() - 1);
-			SelectionVector sel(&last);
+			SelectionVector sel(&last, 1ULL);
 			delayed.Reset();
 			scanned.Copy(delayed, sel, count);
 			prev = &delayed;

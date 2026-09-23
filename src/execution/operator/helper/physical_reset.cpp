@@ -1,4 +1,6 @@
 #include "duckdb/execution/operator/helper/physical_reset.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/execution/operator/helper/physical_set.hpp"
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/database.hpp"
@@ -8,14 +10,16 @@ namespace duckdb {
 
 void PhysicalReset::ResetExtensionVariable(ExecutionContext &context, DBConfig &config,
                                            ExtensionOption &extension_option) const {
+	auto effective_scope = scope == SetScope::AUTOMATIC ? extension_option.default_scope : scope;
 	if (extension_option.set_function) {
-		extension_option.set_function(context.client, scope, extension_option.default_value);
+		extension_option.set_function(context.client, effective_scope, extension_option.default_value);
 	}
-	if (scope == SetScope::GLOBAL) {
-		config.ResetOption(name);
+	if (effective_scope == SetScope::GLOBAL) {
+		config.ResetOption(extension_option);
 	} else {
 		auto &client_config = ClientConfig::GetConfig(context.client);
-		client_config.set_variables[name.ToStdString()] = extension_option.default_value;
+		auto setting_index = extension_option.setting_index.GetIndex();
+		client_config.user_settings.SetUserSetting(setting_index, extension_option.default_value);
 	}
 }
 
@@ -27,47 +31,39 @@ SourceResultType PhysicalReset::GetDataInternal(ExecutionContext &context, DataC
 		return SourceResultType::FINISHED;
 	}
 	auto &config = DBConfig::GetConfig(context.client);
-	config.CheckLock(name);
-	auto option = DBConfig::GetOptionByName(name);
-
+	Identifier option_name(name.ToStdString());
+	config.CheckLock(option_name);
+	auto option = DBConfig::GetOptionByName(option_name);
 	if (!option) {
 		// check if this is an extra extension variable
-		auto entry = config.extension_parameters.find(name.ToStdString());
-		if (entry == config.extension_parameters.end()) {
-			auto extension_name = Catalog::AutoloadExtensionByConfigName(context.client, name);
-			entry = config.extension_parameters.find(name.ToStdString());
-			if (entry == config.extension_parameters.end()) {
+		ExtensionOption extension_option;
+		if (!config.TryGetExtensionOption(option_name, extension_option)) {
+			auto extension_name = Catalog::AutoloadExtensionByConfigName(context.client, option_name);
+			if (!config.TryGetExtensionOption(option_name, extension_option)) {
 				throw InvalidInputException("Extension parameter %s was not found after autoloading", name);
 			}
 		}
-		ResetExtensionVariable(context, config, entry->second);
+		ResetExtensionVariable(context, config, extension_option);
 		return SourceResultType::FINISHED;
 	}
 
 	// Transform scope
-	SetScope variable_scope = scope;
-	if (variable_scope == SetScope::AUTOMATIC) {
-		if (option->set_local) {
-			variable_scope = SetScope::SESSION;
-		} else if (option->set_global) {
-			variable_scope = SetScope::GLOBAL;
-		} else {
-			variable_scope = option->default_scope;
-		}
-	}
+	SetScope variable_scope = PhysicalSet::GetSettingScope(*option, scope);
 
 	if (option->default_value) {
 		if (option->set_callback) {
 			SettingCallbackInfo info(context.client, variable_scope);
+			info.is_reset = true;
 			auto parameter_type = DBConfig::ParseLogicalType(option->parameter_type);
 			Value reset_val = Value(option->default_value).CastAs(context.client, parameter_type);
 			option->set_callback(info, reset_val);
 		}
+		auto setting_index = option->setting_idx.GetIndex();
 		if (variable_scope == SetScope::SESSION) {
 			auto &client_config = ClientConfig::GetConfig(context.client);
-			client_config.set_variables.erase(option->name);
+			client_config.user_settings.ClearSetting(setting_index);
 		} else {
-			config.ResetGenericOption(option->name);
+			config.ResetGenericOption(setting_index);
 		}
 		return SourceResultType::FINISHED;
 	}

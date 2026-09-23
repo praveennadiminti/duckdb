@@ -10,6 +10,7 @@
 
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/planner/expression.hpp"
+#include "duckdb/planner/expression/bound_window_expression.hpp"
 
 namespace duckdb {
 
@@ -18,7 +19,7 @@ class PhysicalStreamingWindow : public PhysicalOperator {
 public:
 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::STREAMING_WINDOW;
 
-	static bool IsStreamingFunction(ClientContext &context, unique_ptr<Expression> &expr);
+	static bool IsStreamingFunction(ClientContext &context, BoundWindowExpression &wexpr);
 
 public:
 	PhysicalStreamingWindow(PhysicalPlan &physical_plan, vector<LogicalType> types,
@@ -30,7 +31,6 @@ public:
 
 public:
 	unique_ptr<GlobalOperatorState> GetGlobalOperatorState(ClientContext &context) const override;
-	unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context) const override;
 
 	OperatorResultType Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
 	                           GlobalOperatorState &gstate, OperatorState &state) const override;
@@ -50,13 +50,13 @@ public:
 
 private:
 	void ExecuteFunctions(ExecutionContext &context, DataChunk &chunk, DataChunk &delayed,
-	                      GlobalOperatorState &gstate_p, OperatorState &state_p) const;
+	                      GlobalOperatorState &gstate_p) const;
 	void ExecuteInput(ExecutionContext &context, DataChunk &delayed, DataChunk &input, DataChunk &chunk,
-	                  GlobalOperatorState &gstate, OperatorState &state) const;
+	                  GlobalOperatorState &gstate) const;
 	void ExecuteDelayed(ExecutionContext &context, DataChunk &delayed, DataChunk &input, DataChunk &chunk,
-	                    GlobalOperatorState &gstate, OperatorState &state) const;
+	                    GlobalOperatorState &gstate) const;
 	void ExecuteShifted(ExecutionContext &context, DataChunk &delayed, DataChunk &input, DataChunk &chunk,
-	                    GlobalOperatorState &gstate, OperatorState &state) const;
+	                    GlobalOperatorState &gstate) const;
 };
 
 } // namespace duckdb

@@ -23,7 +23,7 @@ class DatabaseManager;
 enum class InsertDatabasePathResult { SUCCESS, ALREADY_EXISTS };
 
 struct DatabasePathInfo {
-	DatabasePathInfo(DatabaseManager &manager, string name_p, AccessMode access_mode);
+	DatabasePathInfo(DatabaseManager &manager, const Identifier &name_p, AccessMode access_mode);
 
 	string name;
 	AccessMode access_mode;
@@ -35,7 +35,7 @@ struct DatabasePathInfo {
 class DatabaseFilePathManager {
 public:
 	idx_t ApproxDatabaseCount() const;
-	InsertDatabasePathResult InsertDatabasePath(DatabaseManager &manager, const string &path, const string &name,
+	InsertDatabasePathResult InsertDatabasePath(DatabaseManager &manager, const string &path, const Identifier &name,
 	                                            OnCreateConflict on_conflict, AttachOptions &options);
 	//! Erase a database path - indicating we are done with using it
 	void EraseDatabasePath(const string &path);
@@ -48,7 +48,11 @@ private:
 	//! A set containing all attached database path
 	//! This allows to attach many databases efficiently, and to avoid attaching the
 	//! same file path twice
+#if defined(_WIN32) || defined(__APPLE__)
 	case_insensitive_map_t<DatabasePathInfo> db_paths;
+#else  // !(_WIN32 or __APPLE__)
+	unordered_map<string, DatabasePathInfo> db_paths;
+#endif // _WIN32 or __APPLE__
 };
 
 } // namespace duckdb

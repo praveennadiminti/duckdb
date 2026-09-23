@@ -11,8 +11,8 @@
 #endif
 
 namespace duckdb {
-static const char *continuationPrompt = "> ";
-static const char *continuationSelectedPrompt = "> ";
+static const char *continuationPrompt = "  ";
+static const char *continuationSelectedPrompt = "  ";
 static const char *scrollUpPrompt = "^ ";
 static const char *scrollDownPrompt = "v ";
 static bool enableCompletionRendering = false;
@@ -262,7 +262,7 @@ string Linenoise::AddContinuationMarkers(const char *buf, size_t len, int plen, 
 				prompt = continuationSelectedPrompt;
 			} else if (truncate_top && rows == 2) {
 				prompt = scrollUpPrompt;
-			} else if (truncate_bottom && rows == rows_to_render + 1) {
+			} else if (truncate_bottom && NumericCast<idx_t>(rows) == rows_to_render + 1) {
 				prompt = scrollDownPrompt;
 			} else {
 				prompt = continuationPrompt;
@@ -790,7 +790,7 @@ void Linenoise::RefreshMultiLine() {
 	int new_cursor_row, new_cursor_x;
 	PositionToColAndRow(pos, new_cursor_row, new_cursor_x, rows, cols);
 	int col; /* column position, zero-based. */
-	int old_rows = maxrows ? maxrows : 1;
+	idx_t old_rows = maxrows ? maxrows : 1;
 	int fd = ofd;
 	std::string highlight_buffer;
 	auto render_buf = this->buf;
@@ -807,8 +807,8 @@ void Linenoise::RefreshMultiLine() {
 		// if we are rendering completions keep at least one line clear for rendering them
 		max_rows_to_render--;
 	}
-	if (rows > max_rows_to_render) {
-		if (max_rows_to_render == ws.ws_row && rendered_completion_lines > 0) {
+	if (NumericCast<idx_t>(rows) > max_rows_to_render) {
+		if (max_rows_to_render == NumericCast<idx_t>(ws.ws_row) && rendered_completion_lines > 0) {
 			y_scroll--;
 		}
 		// the text does not fit in the terminal (too many rows)
@@ -908,14 +908,15 @@ void Linenoise::RefreshMultiLine() {
 	/* First step: clear all the lines used before. To do so start by
 	 * going to the last row. */
 	AppendBuffer append_buffer;
-	if (old_rows - old_cursor_rows > 0) {
-		Linenoise::Log("go down %d\n", old_rows - old_cursor_rows);
-		snprintf(seq, 64, "\x1b[%dB", old_rows - int(old_cursor_rows));
+	if (old_rows > old_cursor_rows) {
+		int extra_rows = old_rows - old_cursor_rows;
+		Linenoise::Log("go down %d\n", extra_rows);
+		snprintf(seq, 64, "\x1b[%dB", extra_rows);
 		append_buffer.Append(seq);
 	}
 
 	/* Now for every row clear it, go up. */
-	for (int j = 0; j < old_rows - 1; j++) {
+	for (idx_t j = 0; j + 1 < old_rows; j++) {
 		Linenoise::Log("clear+up\n");
 		append_buffer.Append("\r\x1b[0K\x1b[1A");
 	}
@@ -1031,7 +1032,7 @@ void Linenoise::RefreshMultiLine() {
 				// oversized column - start a new line if this is not the beginning of a line
 				if (column_index > 0) {
 					// have to wrap around - add a newline
-					if (rendered_rows + 1 + rows > ws.ws_row) {
+					if (rendered_rows + 1 + NumericCast<idx_t>(rows) > NumericCast<idx_t>(ws.ws_row)) {
 						// too many rows - stop rendering completion results
 						break;
 					}
@@ -1041,7 +1042,7 @@ void Linenoise::RefreshMultiLine() {
 				}
 				// oversized values might need multiple lines - check if there is space
 				idx_t total_lines = completion_length / ws.ws_row;
-				if (rendered_rows + total_lines + rows > ws.ws_row) {
+				if (rendered_rows + total_lines + NumericCast<idx_t>(rows) > NumericCast<idx_t>(ws.ws_row)) {
 					// no space - truncate to a single line
 					idx_t max_render_pos =
 					    ColAndRowToPosition(0, rendered_text.c_str(), rendered_text.size(), 0, ws.ws_col);
@@ -1065,7 +1066,7 @@ void Linenoise::RefreshMultiLine() {
 			column_index++;
 			if (column_index >= column_count || is_oversized_value) {
 				// have to wrap around - add a newline
-				if (rendered_rows + 1 + rows > ws.ws_row) {
+				if (rendered_rows + 1 + NumericCast<idx_t>(rows) > NumericCast<idx_t>(ws.ws_row)) {
 					// too many rows - stop rendering completion results
 					break;
 				}
